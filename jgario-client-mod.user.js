@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/johnagario/jgario-client-mod/issues
 // @updateURL    https://raw.githubusercontent.com/johnagario/jgario-client-mod/main/jgario-client-mod.user.js
 // @downloadURL  https://raw.githubusercontent.com/johnagario/jgario-client-mod/main/jgario-client-mod.user.js
-// @version      2.4.12
+// @version      2.6.1
 // @description  Fixing the agar.io client to accommodate high refresh rates + Every vanilla mod you have ever needed.
 // @match        https://agar.io/*
 // @run-at       document-start
@@ -3051,6 +3051,8 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
     region: '', mode: ':ffa',
     current: null,
     list: {},                // "region|mode" -> { host: {first, last, n} }
+    tok: {},                 // host -> the party code (token) the master gave with that server in party mode
+    finderHost: null,        // the server last joined from the list / a pasted code (no party code is set for those joins)
     running: false, stop: false, log: [], raw: [], ws: null, pending: null, tpl: [], note: '', noteUntil: 0, lastTry: 0, wantMenu: false, booted: false
   };
 
@@ -3113,6 +3115,12 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
     } catch (e) { }
     return xOpen.apply(this, arguments);
   };
+  var mkParty = null;         // { host, tok, until }: the game's next v4/createToken is answered with this server's own party code
+  function tokOf(h) { if (st.tok[h]) return st.tok[h]; var r = ''; try { pinsGet().forEach(function (p) { if (p.h === h && p.tk) r = p.tk; }); } catch (e) { } return r; }
+  function setTok(h, t) {
+    if (!h || !t) return; st.tok[h] = t;
+    try { var a = pinsGet(), ch = false; a.forEach(function (p) { if (p.h === h && p.tk !== t) { p.tk = t; ch = true; } }); if (ch) pinsSet(a); } catch (e) { }
+  }
   var forced = null;          // { host, used } : the game's next v4/findServer is answered with this server
 
   // ---------- stay on the server when a spawn fails
@@ -3141,8 +3149,8 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
     armAuto(); clearTimeout(auto.timer); auto.timer = setTimeout(giveUp, 20000);
   }
   document.addEventListener('change', function (e) { if (e.target && e.target.id === 'region') stopRejoin(); }, true);
-  function fakeAnswer(xhr, host, wait) {
-    var text = JSON.stringify({ status: 'ok', endpoints: { http: host, https: host } });
+  function fakeAnswer(xhr, host, wait, obj) {
+    var text = JSON.stringify(obj || { status: 'ok', endpoints: { http: host, https: host } });
     ['responseText', 'response'].forEach(function (k) { Object.defineProperty(xhr, k, { configurable: true, get: function () { return text; } }); });
     Object.defineProperty(xhr, 'status', { configurable: true, get: function () { return 200; } });
     Object.defineProperty(xhr, 'readyState', { configurable: true, get: function () { return 4; } });
@@ -3157,6 +3165,14 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
         fakeAnswer(this, fh, fw);
         return;
       }
+      if (mkParty && f0 && /\/v4\/createToken$/.test(f0.url.split('?')[0])) {            // Create pressed while on a server joined from the list: the party is made of THIS server
+        var mp = mkParty; mkParty = null;
+        if (Date.now() < mp.until && st.current === mp.host) {
+          say('Create: the party of this server (its own code) instead of a new server');
+          fakeAnswer(this, mp.host, 200, { token: mp.tok });
+          return;
+        }
+      }
       var info = this.__srv;
       if (info && /\/v4\/findServer(WithFriends)?$/.test(info.url.split('?')[0]) && auto.timer && st.wantMenu && !st.pending) {
         clearTimeout(auto.timer); auto.timer = setTimeout(giveUp, 8000);
@@ -3169,7 +3185,7 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
         this.addEventListener('load', function () {
           try {
             var j = JSON.parse(xhr.responseText);
-            if (j && j.endpoints) { var h = j.endpoints.https || j.endpoints.http; if (addServer(region, mode, h, 'game')) refresh(); }
+            if (j && j.endpoints) { var h = j.endpoints.https || j.endpoints.http; if (j.token) setTok(h, j.token); if (addServer(region, mode, h, 'game')) refresh(); }
           } catch (e) { }
         });
         setTimeout(refresh, 0);
@@ -3241,7 +3257,7 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
         try {
           var j = await ask(region, modes[m]), e = j.endpoints;
           if (!e || e.https === '0.0.0.0:0' || e.http === '0.0.0.0:0') { say(modes[m] + ': master had no server ("' + (j.status || '?') + '")'); errs++; }
-          else { errs = 0; done++; if (addServer(region, modes[m], e.https || e.http, 'sample')) fresh++; }
+          else { errs = 0; done++; if (j.token) setTok(e.https || e.http, j.token); if (addServer(region, modes[m], e.https || e.http, 'sample')) fresh++; }
         } catch (err) { errs++; say(modes[m] + ' #' + (i + 1) + ' failed: ' + (err && err.message || err)); }
         if (errs >= 3) { say('3 errors in a row - stopped.'); break outer; }
         refresh();
@@ -3276,7 +3292,7 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
     var core = window.core, label = codeOf(host) || host;
     if (!core || typeof core.connect !== 'function') { setNote('The game is not ready (no core.connect found).'); say('window.core.connect is not available'); return; }
     stopRejoin();
-    var mine = { host: host, used: false }; forced = mine;
+    var mine = { host: host, used: false }; forced = mine; st.finderHost = host; mkParty = null;
     setTimeout(function () { if (forced === mine) forced = null; }, 4000);
     st.wantMenu = true; st.pending = host;
     docEvent('hide_main_menu');                // close the menu right away, so that spectating always works; it opens again afterwards
@@ -3320,6 +3336,12 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
   document.addEventListener('click', function (e) {
     try {
       var t = e.target; if (!t || !t.closest) return;
+      if (t.closest('#mainui-party .party-create')) {
+        var mc0 = window.MiniclipAPI && window.MiniclipAPI.instance, inParty = false;
+        try { inParty = !!(mc0 && mc0.getPartyToken && mc0.getPartyToken()); } catch (e2) { }
+        var tk0 = st.current && st.finderHost === st.current && !inParty ? tokOf(st.current) : '';
+        mkParty = tk0 ? { host: st.current, tok: tk0, until: Date.now() + 10000 } : null;
+      }
       if (t.closest('#mainui-modes .item, #mainui-modes [id^="mode_"], #mainui-party .party-create')) { stopRejoin(); freshStart(); armAuto(); }
       else if (t.closest('#mainui-party .party-join') && partyCodeShown()) { stopRejoin(); freshStart(); armAuto(); }
     } catch (err) { }
@@ -3399,6 +3421,27 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
     var hs = parseServers(text);
     return hs[0] || { error: 'That is not a server code, link or address.' };
   }
+  // ---------- pinned servers: kept in the browser for 3 hours (they survive refreshes), listed above the search results ----------
+  var PIN_KEY = 'jgarSrvPins', PIN_MS = 3 * 3600 * 1000, pinMem = null;
+  var MODE_TAG = { ':ffa': 'FFA', ':experimental': 'EXP', ':teams': 'TEAMS', ':party': 'PARTY', ':battleroyale': 'BR' };
+  function pinsGet() {
+    var a = null, now = Date.now(), stored = false;
+    try { a = JSON.parse(realLS.getItem(PIN_KEY) || 'null'); stored = true; } catch (e) { }
+    if (!Array.isArray(a)) a = stored ? [] : (pinMem || []);       // the copy in memory is only for a browser that will not store
+    var keep = a.filter(function (p) { return p && typeof p.h === 'string' && p.exp > now; });
+    if (keep.length !== a.length) pinsSet(keep);
+    pinMem = keep;
+    return keep;
+  }
+  function pinsSet(a) { pinMem = a; try { realLS.setItem(PIN_KEY, JSON.stringify(a)); } catch (e) { } }
+  function pinToggle(h, region, mode) {
+    var a = pinsGet(), i = -1; a.forEach(function (p, k) { if (p.h === h) i = k; });
+    if (i >= 0) a.splice(i, 1); else a.push({ h: h, region: region || '', mode: mode || ':ffa', at: Date.now(), exp: Date.now() + PIN_MS, tk: st.tok[h] || '' });
+    pinsSet(a);
+  }
+  function pinTag(p) { return ((p.region || '').split('-')[0] || '?') + ' ' + (MODE_TAG[p.mode] || String(p.mode || '').replace(/^:/, '').toUpperCase()); }
+  function seenAt(h, fallback) { var t = 0; Object.keys(st.list).forEach(function (k) { var e = st.list[k][h]; if (e && e.last > t) t = e.last; }); return t || fallback; }
+  var PIN_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>';
   function clock(ts) { var d = new Date(ts); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
 
   // ---------- UI: two cards in the game's own main menu ----------
@@ -3465,6 +3508,8 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
       '.desc{flex:none;min-height:2.7em;margin:0 0 6px;text-align:center}' +
       '.list{flex:1 1 auto;min-height:0;overflow-y:auto;border-top:1px solid #e6e6e6}' +
       '.item{display:flex;gap:12px;align-items:baseline;padding:5px 8px;cursor:pointer;border-bottom:1px solid #f0f0f0;font-family:Consolas,Menlo,monospace;font-size:' + S.xSize + ';color:' + S.tColor + '}' +
+      '.item .pin{flex:none;align-self:center;display:inline-flex;margin:0 -4px 0 -2px;padding:1px 2px;color:#c9c9c9;cursor:pointer;transform:rotate(35deg)}.item .pin:hover{color:#8db6e8}.item .pin.on{color:#1e88e5}.item .pin.on:hover{color:#1565c0}' +
+      '.item .tg{flex:none;align-self:center;font-family:' + S.xFont + ';font-size:.72em;font-weight:700;letter-spacing:.3px;color:' + S.xColor + ';background:#f0f0f0;border-radius:3px;padding:1px 6px}.item.pl{border-bottom:2px solid #dcdcdc}' +
       '.item:hover{background:#f1f1f1}.item .t{font-family:' + S.xFont + ';color:' + S.xColor + ';flex:none;font-variant-numeric:tabular-nums}.item .y{margin-left:auto;font-family:' + S.xFont + ';font-size:.85em;color:' + S.grBg + ';flex:none}' +
       '.empty{padding:14px 8px;text-align:center}' +
       'details{flex:none;margin-top:6px;font-size:.9em}summary{cursor:pointer;color:' + S.xColor + '}' +
@@ -3755,18 +3800,29 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
     $('#region').value = form.region;
     $('#mode').value = form.mode;
     var L = st.list[form.region + '|' + form.mode] || {}, hs = Object.keys(L).sort(function (a, b) { a = codeOf(a) || a; b = codeOf(b) || b; return a < b ? -1 : a > b ? 1 : 0; });
-    var h = '';
+    var h = '', pins = pinsGet().slice().sort(function (a, b) { return a.at - b.at; }), pinned = {};
+    pins.forEach(function (p, i) {                                    // pinned servers first, whatever region / mode is searched
+      pinned[p.h] = 1;
+      h += '<div class="item pin-row' + (i === pins.length - 1 ? ' pl' : '') + '" data-h="' + esc(p.h) + '" title="' + esc(p.h) + '"><span class="pin on" data-pin="' + esc(p.h) + '" title="Unpin (pins clear themselves after 3 hours)">' + PIN_SVG + '</span><span class="t">' + clock(seenAt(p.h, p.at)) + '</span><span>' + esc(codeOf(p.h) || p.h) + '</span><span class="tg">' + esc(pinTag(p)) + '</span>' +
+        (p.h === st.current ? '<span class="y">you are here</span>' : '') + '</div>';
+    });
+    var found = '';
     hs.forEach(function (x) {
-      h += '<div class="item" data-h="' + esc(x) + '" title="' + esc(x) + '"><span class="t">' + clock(L[x].last) + '</span><span>' + esc(codeOf(x) || x) + '</span>' +
+      if (pinned[x]) return;
+      found += '<div class="item" data-h="' + esc(x) + '" title="' + esc(x) + '"><span class="pin" data-pin="' + esc(x) + '" title="Pin this server (kept for 3 hours)">' + PIN_SVG + '</span><span class="t">' + clock(L[x].last) + '</span><span>' + esc(codeOf(x) || x) + '</span>' +
         (x === st.current ? '<span class="y">you are here</span>' : '') + '</div>';
     });
-    h = h || '<div class="empty">' + (!st.master ? 'Waiting for the game to start up...' : !form.region ? 'Pick a region.' : st.running ? 'Searching...' : 'Nothing found yet.') + '</div>';
+    h += found;
+    if (!found) h += '<div class="empty">' + (!st.master ? 'Waiting for the game to start up...' : !form.region ? 'Pick a region.' : st.running ? 'Searching...' : 'Nothing found yet.') + '</div>';
     if (h !== drawn.list) {
       var lst = $('#list'), keepTop = lst.scrollTop;
       lst.innerHTML = h; drawn.list = h;
       lst.scrollTop = keepTop;
       [].forEach.call(rB.querySelectorAll('.item'), function (el) {
         el.onclick = function () { form.input = null; connectTo(el.getAttribute('data-h')); };
+      });
+      [].forEach.call(rB.querySelectorAll('.pin'), function (el) {
+        el.onclick = function (ev) { ev.stopPropagation(); ev.preventDefault(); pinToggle(el.getAttribute('data-pin'), form.region, form.mode); drawn.list = null; draw(); };
       });
     }
     var ro = $('#region').selectedOptions && $('#region').selectedOptions[0], mo = $('#mode').selectedOptions && $('#mode').selectedOptions[0];
@@ -3781,6 +3837,8 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
     $('#spec').checked = form.spectate; $('#stay').checked = form.stay;
     var lt = st.log.join('\n'); if (lt !== drawn.log) { $('#log').textContent = lt; drawn.log = lt; }
   }
+  setInterval(function () { try { if (hostA) refresh(true); } catch (e) { } }, 15000);       // pins that ran out disappear on their own
+  window.addEventListener('storage', function (e) { if (e.key === PIN_KEY) { drawn.list = null; refresh(true); } });
   var pending = false;
   function refresh(force) {
     if (!hostA) { if (document.body) ensureCards(); return; }
@@ -3807,7 +3865,7 @@ if(typeof module!=='undefined')module.exports=root.AgarAcct;
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startWatching); else startWatching();
 
-  window.__agarSrv = { state: st, form: form, sample: sample, body: findServerBody, parse: parseBody, add: addServer, draw: draw, ensure: ensureCards,
+  window.__agarSrv = { tokOf: tokOf, setTok: setTok, pins: pinsGet, pin: pinToggle, state: st, form: form, sample: sample, body: findServerBody, parse: parseBody, add: addServer, draw: draw, ensure: ensureCards,
     connect: connectTo, parseHosts: parseServers, code: codeOf, resolve: resolveTarget, search: startSearch, styles: function () { return S; } };
 })();
 
